@@ -1,9 +1,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <numeric>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -35,15 +36,16 @@ Stats compute_stats(std::vector<long long>& samples) {
 }
 
 // CPU-bound work
-void do_work(int iterations) {
-    volatile double x = 0.0;
+double do_work(int iterations) {
+    double x = 0.0;
     for (int i = 0; i < iterations; ++i) {
         x += std::sin(i * 0.001);
     }
+    return x;
 }
 
 int main() {
-    const int N = 100000;
+    const int N = 1000000;
 
     // predictable always does this much work
     const int predictable_iters = 120;
@@ -52,7 +54,7 @@ int main() {
     const int jitter_base_iters = 100;
 
     // rare spike adds this much work
-    const int jitter_extra_iters = 5000;
+    const int jitter_extra_iters = 1000;
 
     std::vector<long long> predictable_lat;
     std::vector<long long> jittery_lat;
@@ -60,32 +62,53 @@ int main() {
     jittery_lat.reserve(N);
 
     // -------------------------------
-    // Pre-generate jitter pattern
+    // Load jitter pattern from file
     // -------------------------------
-    std::vector<bool> spike(N);
+    // Loading at runtime hides the pattern from the compiler so it cannot
+    // hoist, predict, or constant-fold the spike branch.
+    std::vector<uint8_t> spike;
+    {
+        const char* path = "spike_vector.bin";
+        FILE* f = std::fopen(path, "rb");
+        if (!f) {
+            std::cerr << "Failed to open " << path
+                      << ". Run ./generate_spike_vector first.\n";
+            return 1;
+        }
+        size_t count = 0;
+        if (std::fread(&count, sizeof(count), 1, f) != 1) {
+            std::cerr << "Failed to read header from " << path << "\n";
+            std::fclose(f);
+            return 1;
+        }
+        spike.resize(count);
+        if (std::fread(spike.data(), 1, count, f) != count) {
+            std::cerr << "Failed to read spike data from " << path << "\n";
+            std::fclose(f);
+            return 1;
+        }
+        std::fclose(f);
 
-    std::mt19937_64 rng(12345);  // deterministic seed
-    std::bernoulli_distribution spike_dist(0.01); // 1% chance
-
-    for (int i = 0; i < N; ++i) {
-        spike[i] = spike_dist(rng);
+        if (spike.size() != static_cast<size_t>(N)) {
+            std::cerr << "spike_vector.bin has " << spike.size()
+                      << " entries; expected " << N
+                      << ". Regenerate with: ./generate_spike_vector " << N << "\n";
+            return 1;
+        }
     }
+
+    // Sinks: accumulate do_work's return value so the compiler must actually
+    // run the loops. Printed at the end.
+    double sink_warmup = 0.0;
+    double sink_pred   = 0.0;
+    double sink_jit    = 0.0;
 
     // Warmup
-    for (int i = 0; i < 1000; ++i) {
-        do_work(predictable_iters);
-        do_work(jitter_base_iters + (spike[i % N] ? jitter_extra_iters : 0));
-    }
 
-    // Measure predictable system
-    for (int i = 0; i < N; ++i) {
-        auto start = Clock::now();
-        do_work(predictable_iters);
-        auto end = Clock::now();
-        predictable_lat.push_back(std::chrono::duration_cast<ns>(end - start).count());
-    }
+    // Measure jittery system first so its loop absorbs the residual warmup
+    // (CPU frequency ramp, branch predictor settle, vDSO icache fill).
 
-    // Measure jittery system
+    // Predictable then runs in steady state for a cleaner per-op comparison.
     for (int i = 0; i < N; ++i) {
         int iters = jitter_base_iters;
         if (spike[i]) {
@@ -93,9 +116,21 @@ int main() {
         }
 
         auto start = Clock::now();
-        do_work(iters);
+        double r = do_work(iters);
         auto end = Clock::now();
-        jittery_lat.push_back(std::chrono::duration_cast<ns>(end - start).count());
+        sink_jit += r;
+        jittery_lat.push_back
+        (std::chrono::duration_cast<ns>(end - start).count());
+    }
+
+    // Measure predictable system
+    for (int i = 0; i < N; ++i) {
+        auto start = Clock::now();
+        double r = do_work(predictable_iters);
+        auto end = Clock::now();
+        sink_pred += r;
+        predictable_lat.push_back
+        (std::chrono::duration_cast<ns>(end - start).count());
     }
 
     Stats s_pred = compute_stats(predictable_lat);
@@ -113,8 +148,10 @@ int main() {
     print_stats("Predictable system", s_pred);
     print_stats("Jittery system", s_jit);
 
-    std::cout << "Note: Expect jittery to have LOWER mean but MUCH HIGHER p99/p999.\n";
-    std::cout << "This shows: a ~10% faster average can still lose in tail latency.\n";
+
+    // Print sinks so the compiler cannot discard do_work.
+    std::cout << " pred=" << sink_pred
+              << " jit="  << sink_jit << "\n";
 
     return 0;
 }
