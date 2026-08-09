@@ -1,0 +1,32 @@
+# Build directories
+build/
+cmake-build-*/
+
+# CMake scratch
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Object files & debug info
+*.o
+*.obj
+*.dSYM/
+*.trace/
+
+# Generated data blobs
+*.bin
+
+# Compiled benchmark binaries (extensionless, sit next to their .cpp)
+averages_lie
+branch_prediction
+find_architecture
+generate_branch_data
+generate_spike_vector
+map_vs_unordered_map
+memory_ordering
+false_sharing
+mpmc
+predictibility_vs_jitter
+simd_neon
+soa_vs_aos_benchmark
